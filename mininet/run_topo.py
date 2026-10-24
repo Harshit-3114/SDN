@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))   # import topology.py
 from mininet.net import Mininet
 from mininet.node import OVSSwitch, RemoteController
 from mininet.cli import CLI
-from mininet.log import info, setLogLevel
+from mininet.log import info, warn, setLogLevel
 
 from topology import LinearTopo
 from purge_state import purge

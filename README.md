@@ -110,7 +110,10 @@ control panel inside WSL and opens `http://localhost:5000` in your browser.
 
 The panel owns the whole lab (OVS + Ryu + Mininet) in one process:
 
-* **Start lab / Stop lab / Full stop** buttons
+* **Start lab / Stop lab / Full stop** buttons — *Start* self-heals leftover
+  state (a stale or half-dead controller process is detected, killed and
+  restarted automatically); *Full stop* stops the lab **and** the controller
+  (the panel itself stays open)
 * **pingall** — two rounds (controller-learned vs flow-cached) with timings
 * **Detailed ping matrix** — every one of the 30 host pairs individually
 * **ping** between any two hosts, **iperf** h1→h6 throughput

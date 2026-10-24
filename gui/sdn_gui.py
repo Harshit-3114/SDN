@@ -64,6 +64,21 @@ app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 
 
+def _labop(fn):
+    """Decorate a lab operation: take the lab lock and refuse to run when
+    the lab is not actually up (before: the guard tuple was always truthy,
+    so ops ran against a broken lab and hung)."""
+    def wrap(self, *args, **kw):
+        with self.lock:
+            guard = self._require()
+            if guard:
+                return guard
+            return fn(self, *args, **kw)
+    wrap.__name__ = fn.__name__
+    wrap.__doc__ = fn.__doc__
+    return wrap
+
+
 class Lab:
     """Everything the panel drives, guarded by one lock."""
 
@@ -112,6 +127,48 @@ class Lab:
         return rec
 
     # -- lifecycle -----------------------------------------------------------
+    def _ryu_logtail(self, n=4):
+        try:
+            return ' | '.join(
+                (ROOT / 'outputs' / 'ryu.log').read_text(errors='replace')
+                .splitlines()[-n:]).strip() or '(log empty)'
+        except Exception:
+            return '(no ryu.log)'
+
+    def _clear_port(self):
+        """Kill whatever process holds the OpenFlow port (stale controller)."""
+        out = self._run("ss -ltnp | grep ':%d '" % OF_PORT).stdout
+        for pid in sorted(set(re.findall(r'pid=(\d+)', out))):
+            self._run('kill -9 %s' % pid)
+
+    def _spawn_ryu(self, steps):
+        sub = subprocess.Popen(
+            ['setsid', 'env', 'PYTHONPATH=' + RYU_ENV['PYTHONPATH'],
+             RYU_PY, *RYU_RUN],
+            stdout=open(ROOT / 'outputs' / 'ryu.log', 'w'),
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, start_new_session=True)
+        steps.append('       launched fresh controller (pid %d)' % sub.pid)
+        if not self._wait_ryu_up(steps):
+            raise RuntimeError('controller never listened on %d after 30 s -- '
+                               'outputs/ryu.log tail: %s'
+                               % (OF_PORT, self._ryu_logtail()))
+
+    def _wait_ryu_up(self, steps, max_secs=30):
+        """Poll for the OpenFlow port; bail early if the process vanished."""
+        for i in range(max_secs * 2):
+            if self._ryu_listening():
+                steps.append('       OpenFlow port %d listening' % OF_PORT)
+                return True
+            if not self._ryu_running() and i >= 4:
+                steps.append('       controller process DIED -- ryu.log tail: '
+                             '%s' % self._ryu_logtail())
+                return False
+            time.sleep(0.5)
+        steps.append('       not listening after %d s -- ryu.log tail: %s'
+                     % (max_secs, self._ryu_logtail()))
+        return False
+
     def start(self):
         with self.lock:
             if self.state == 'running':
@@ -129,49 +186,52 @@ class Lab:
                 purge(verbose=False)
                 steps.append('       clean')
                 steps.append('[3/4] Ryu controller (l2_learn_switch.py)')
-                if self._ryu_running() and self._ryu_listening():
-                    steps.append('       already running')
+                if self._ryu_listening() and self._ryu_running():
+                    steps.append('       already listening on %d' % OF_PORT)
+                elif self._ryu_listening():
+                    # port held by some other process -- take it back
+                    steps.append('       port %d is held by a foreign process '
+                                 '-- clearing it first' % OF_PORT)
+                    self._clear_port()
+                    time.sleep(0.5)
+                    self._spawn_ryu(steps)
                 elif self._ryu_running():
-                    steps.append('       process alive but not listening yet'
-                                 ' -- waiting')
-                    self._wait_ryu_up(steps)
+                    # maybe it is genuinely still booting; give it a moment,
+                    # then self-heal a wedged/stale controller
+                    if not self._wait_ryu_up(steps, max_secs=6):
+                        steps.append('       stale controller -- killing it '
+                                     'and starting fresh')
+                        self._run('pkill -9 -f l2_learn_switch')
+                        self._clear_port()
+                        time.sleep(0.5)
+                        self._spawn_ryu(steps)
                 else:
-                    sub = subprocess.Popen(
-                        ['setsid', 'env',
-                         'PYTHONPATH=' + RYU_ENV['PYTHONPATH'],
-                         RYU_PY, *RYU_RUN],
-                        stdout=open(ROOT / 'outputs' / 'ryu.log', 'w'),
-                        stderr=subprocess.STDOUT,
-                        stdin=subprocess.DEVNULL, start_new_session=True)
-                    steps.append('       launched pid %d' % sub.pid)
-                    if not self._wait_ryu_up(steps):
-                        raise RuntimeError('ryu did not listen within 30 s; '
-                                           'see outputs/ryu.log')
+                    self._spawn_ryu(steps)
                 steps.append('[4/4] Mininet topology (3 switches, 6 hosts)')
                 self.net = build_net()
                 self.net.start()
-                if not self.net.waitConnected(45):
-                    steps.append('       !! switches not all connected '
-                                 '(check ryu.log)')
-                else:
+                if self.net.waitConnected(45):
                     steps.append('       all switches connected to Ryu')
+                else:
+                    steps.append('       !! switches did not all connect '
+                                 'within 45 s (see ryu.log)')
                 self.started_at = time.time()
-                self.state = 'running' if self._connected_list() else 'error'
-                for sw in SWITCHES:
-                    steps.append('* switch %s ready' % sw) \
-                        if sw in self._connected_list() else None
+                ready = self._connected_list()
+                for sw in sorted(ready):
+                    steps.append('* switch %s ready (%s)' % (sw, CONTROL_ADDR))
+                self.state = ('running' if len(ready) == len(SWITCHES)
+                              else 'error')
             except Exception as exc:                    # keep the server alive
                 self.state = 'error'
-                steps.append('!! start failed: %s' % exc)
+                if self.net:                             # clean the half-built lab
+                    try:
+                        self.net.stop()
+                    except Exception:
+                        pass
+                    self.net = None
+                self._run('mn -c')
+                steps.append('!! start failed: %r' % exc)
             return {'ok': self.state == 'running', 'log': steps}
-
-    def _wait_ryu_up(self, steps):
-        for _ in range(60):
-            if self._ryu_listening():
-                steps.append('       OpenFlow port %d listening' % OF_PORT)
-                return True
-            time.sleep(0.5)
-        return False
 
     def stop(self, full=False):
         with self.lock:
@@ -186,7 +246,7 @@ class Lab:
                     self._run('ovs-vsctl --if-exists del-br %s' % br)
                 steps.append('ovs state purged')
                 if full:
-                    self._run('pkill -f l2_learn_switch')
+                    self._run('pkill -9 -f l2_learn_switch')
                     steps.append('ryu controller stopped')
                 else:
                     steps.append('ryu left running (click Full stop to kill it)')
@@ -197,9 +257,8 @@ class Lab:
             return {'ok': True, 'log': steps}
 
     # -- demos ----------------------------------------------------------------
+    @_labop
     def ping_all(self):
-        if not self._require():
-            return
         t0 = time.time()
         loss1 = self.net.pingAll()
         r1 = {'loss': loss1, 'took': round(time.time() - t0, 2)}
@@ -212,9 +271,8 @@ class Lab:
         self._history('pingall', loss1 == 0 and loss2 == 0, txt)
         return {'ok': True, 'text': txt, 'rounds': [r1, r2]}
 
+    @_labop
     def ping_pair(self, src, dst, count=2, wait=1):
-        if not self._require():
-            return
         s = self.net.get(src)
         d = self.net.get(dst)
         out = s.cmd('ping -c %d -W %d %s' % (count, wait, d.IP()))
@@ -228,10 +286,9 @@ class Lab:
                       '%d%% loss' % loss)
         return {'ok': True, 'text': txt, 'loss': loss}
 
+    @_labop
     def matrix(self):
         """Sequential per-pair ping matrix (fast warm, slower first time)."""
-        if not self._require():
-            return
         rows = []
         all_ok = True
         for src in HOSTS:
@@ -255,9 +312,8 @@ class Lab:
         self._history('ping matrix', all_ok, txt)
         return {'ok': all_ok, 'rows': rows, 'text': txt}
 
+    @_labop
     def iperf(self, seconds=5):
-        if not self._require():
-            return
         h1, h6n = self.net['h1'], self.net['h6']
         h6n.cmd('killall -9 iperf 2>/dev/null')
         h6n.cmd('iperf -s -p 5001 > /tmp/iperf_gui_server.log 2>&1 &')
@@ -274,9 +330,8 @@ class Lab:
         self._history('iperf h1->h6', bool(m), rate)
         return {'ok': bool(m), 'text': txt, 'rate': rate}
 
+    @_labop
     def set_link(self, left, right, state):
-        if not self._require():
-            return
         if state not in ('up', 'down'):
             return {'ok': False, 'text': 'state must be up|down'}
         self.net.configLinkStatus(left, right, state)
@@ -300,14 +355,13 @@ class Lab:
                 continue
         return {'ok': True, 'links': out}
 
+    @_labop
     def controller_op(self, switch, action):
-        if not self._require():
-            return
         sw = self.net.get(switch)
         if action == 'detach':
             sw.cmd('ovs-ofctl -O OpenFlow13 del-flows %s' % switch)
             sw.cmdPrint('ovs-vsctl set-controller %s %s' % (switch, DEAD_ADDR))
-            txt = ('%s detRacted from the controller (dead port %s) and its '
+            txt = ('%s detached from the controller (dead port %s) and its '
                    'flow table was wiped.\nAny new traffic forwarding through '
                    'it now requires a controller: expect 100%% loss '
                    '(failMode=secure).' % (switch, DEAD_ADDR))
@@ -316,17 +370,21 @@ class Lab:
         elif action == 'attach':
             sw.cmdPrint('ovs-vsctl set-controller %s %s' %
                         (switch, CONTROL_ADDR))
-            time.sleep(2)
-            txt = ('%s re-attached to Ryu at %s: the handshake reinstalls the '
-                   'table-miss rule; next unknown traffic re-learns through '
-                   'the controller.' % (switch, CONTROL_ADDR))
+            for _ in range(12):                    # wait for the OFP channel
+                if sw.connected():
+                    break
+                time.sleep(0.5)
+            state_now = 're-connected to Ryu' if sw.connected() \
+                else 'still not connected (check ryu.log)'
+            txt = ('%s re-attached to %s: %s\nNext unknown traffic re-learns '
+                   'through the controller.' % (switch, CONTROL_ADDR,
+                                                state_now))
             self._history('%s attach' % switch, True, txt)
             return {'ok': True, 'text': txt}
         return {'ok': False, 'text': 'action must be attach|detach'}
 
+    @_labop
     def flows(self):
-        if not self._require():
-            return
         tables = {}
         for swname in SWITCHES:
             tables[swname] = self.net[swname].cmd(
@@ -363,11 +421,11 @@ class Lab:
         if head == 'ping' and len(parts) == 3 and \
                 parts[1] in HOSTS and parts[2] in HOSTS:
             return self.ping_pair(parts[1], parts[2])
-        if head == 'link' and len(parts) == 3 and \
-                parts[2] in ('up', 'down') and \
-                parts[0][0:1] == 's' and parts[1][0:1] == 's' and \
-                parts[0] in SWITCHES and parts[1] in SWITCHES:
-            return self.set_link(parts[0], parts[1], parts[2])
+        if head == 'link' and len(parts) == 4 and \
+                parts[3] in ('up', 'down') and \
+                parts[1] in SWITCHES and parts[2] in SWITCHES and \
+                parts[1] != parts[2]:
+            return self.set_link(parts[1], parts[2], parts[3])
         if head in ('detach', 'attach') and len(parts) == 2 and \
                 parts[1] in SWITCHES:
             return self.controller_op(parts[1], head)
@@ -387,10 +445,13 @@ class Lab:
         return {'ok': False, 'text': 'unknown command (try: help)'}
 
     def _require(self):
+        """Return None when the lab may run operations, else the error dict
+        the op should return (the old truthy-tuple guard never blocked)."""
         if self.state != 'running' or not self.net:
-            return False, {'ok': False,
-                           'text': 'lab is not running -- click Start first'}
-        return True, None
+            return {'ok': False,
+                    'text': 'lab is not running -- click Start lab first '
+                            '(state: %s)' % self.state}
+        return None
 
 
 HELP = """Console commands (same ideas as the mininet> CLI):
@@ -423,7 +484,9 @@ def index():
 
 @app.route('/api/status')
 def status():
-    ryu = LAB._ryu_listening() or LAB._ryu_running()
+    # the chip means "controller ACCEPTING OpenFlow connections", not
+    # merely "a process with that name exists" (a dying/stale ryu is red)
+    ryu = LAB._ryu_listening()
     return jsonify({'state': LAB.state, 'detail': LAB.detail,
                     'ovs': LAB._ovs_ok(), 'ryu': ryu,
                     'mininet': LAB.net is not None and LAB.state == 'running',
@@ -677,7 +740,7 @@ async function post(url,data){lock(true,url);
  finally{lock(false,'')}}
 $('b_start').onclick=()=>post('/api/start');
 $('b_stop').onclick=()=>post('/api/stop',{full:0});
-$('b_full').onclick=()=>confirm('Also kill the Ryu controller?')&&post('/api/shutdown');
+$('b_full').onclick=()=>confirm('Stop the lab AND kill the controller?')&&post('/api/stop',{full:1});
 $('b_pingall').onclick=()=>post('/api/pingall');
 $('b_ping').onclick=()=>post('/api/ping',{src:'h1',dst:'h5'});
 $('b_iperf').onclick=()=>post('/api/iperf');
