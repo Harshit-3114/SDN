@@ -1,0 +1,5 @@
+# Keep Windows launchers strictly CRLF and shell scripts LF
+*.bat text eol=crlf
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
