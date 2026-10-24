@@ -114,16 +114,20 @@ The panel owns the whole lab (OVS + Ryu + Mininet) in one process:
   state (a stale or half-dead controller process is detected, killed and
   restarted automatically); *Full stop* stops the lab **and** the controller
   (the panel itself stays open)
+* **Live topology diagram** — dashed Ryu control lines and the s1–s2–s3
+  backbone update in real time: a cut link turns red with a flowing-dash
+  animation, a switch detached from the controller goes dark
 * **pingall** — two rounds (controller-learned vs flow-cached) with timings
-* **Detailed ping matrix** — every one of the 30 host pairs individually
-* **ping** between any two hosts, **iperf** h1→h6 throughput
+* **Detailed ping matrix** — all 30 host pairs at once, per-pair latency in
+  every cell, PASS badge when the board is clean
+* **ping** between any two hosts (with avg RTT), **iperf** h1→h6 throughput
 * **Dynamic connect/disconnect demos** (the rubric row): cut/restore either
   backbone (`link s2 s3 down/up`), and **detach/attach** a switch from the
-  controller — each with a companion "test h4→h1" button showing the
+  controller (s2 *and* s3) — each with a companion test button showing the
   100% loss → recovery story live
 * **Flow tables** viewer (`ovs-ofctl -O OpenFlow13 dump-flows s1/s2/s3`)
-* A console box mirroring the CLI: `pingall | ping h1 h5 | link s2 s3 down |
-  detach s2 | flows | log | help`
+* A console mirroring the CLI (with ↑/↓ command history): `pingall | ping h1
+  h5 | link s2 s3 down | detach s2 | flows | log | help`
 * **History table** — every operation is recorded to
   `outputs/history.jsonl` for the report
 
