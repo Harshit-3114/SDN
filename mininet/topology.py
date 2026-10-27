@@ -21,9 +21,9 @@ Links (created in build order, which fixes the port numbering):
     s1-eth3 <-> s2-eth3                 (s1 -- s2 backbone)
                           s2-eth4 <-> s3-eth3   (s2 -- s3 backbone)
 
-The works under one /24 (10.0.0.0/24 single L2 domain) as natively
-typical of Mininet: any host can reach any other through the switches as
-long as the SDN controller installs the right flow rules.
+Everything lives under one /24 (10.0.0.0/24, a single L2 domain), as is
+natively typical of Mininet: any host can reach any other through the
+switches as long as the SDN controller installs the right flow rules.
 """
 
 from mininet.topo import Topo

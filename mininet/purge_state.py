@@ -29,8 +29,12 @@ def _run(cmd, quiet_fail=True):
 def purge(verbose=True):
     """Delete all topology state a Mininet run might have left behind."""
     steps = (
-        # remove OVS bridge definitions + controller junk (official cleaner)
-        ['mn', '-c'],
+        # remove OVS bridge definitions + controller junk (official cleaner).
+        # MUST be a plain string: with subprocess.run(..., shell=True) a list's
+        # items past the first become arguments to the SHELL and are dropped,
+        # so ['mn', '-c'] actually executed a bare `mn` -- an interactive
+        # Mininet CLI that silently sat waiting on the console for input.
+        'mn -c',
     )
     for cmd in steps:
         _run(cmd)

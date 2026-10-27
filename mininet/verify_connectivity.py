@@ -105,7 +105,7 @@ def run():
         info('*** T1 lost=%s%%, took %.2f s\n' % (loss1, time.time() - t0))
 
         # ------------------------------------------------------------ T2
-        banner('T2: pingAll (round 2) -- same 15 host pairs again, now '
+        banner('T2: pingAll (round 2) -- the same 30 ordered host pairs, now '
                'switched purely by the installed flow rules')
         t0 = time.time()
         loss2 = net.pingAll()

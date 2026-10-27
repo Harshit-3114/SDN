@@ -478,6 +478,25 @@ def _ok(fn):
         return jsonify({'ok': False, 'text': 'error: %r' % exc}), 200
 
 
+# --- CSRF-style guard --------------------------------------------------------
+# The panel binds to 127.0.0.1 only, but a malicious page open in the same
+# browser could still fire drive-by POSTs at it (e.g. /api/shutdown).
+# Browsers send an Origin header on cross-site POSTs; our own panel sends a
+# matching one and curl/test scripts send none. Not enterprise CSRF token
+# auth -- a proportionate shield for a localhost-only lab panel.
+@app.before_request
+def origin_guard():
+    if request.method != 'POST':
+        return None
+    origin = request.headers.get('Origin', '')
+    if not origin:                       # same-process clients: allowed
+        return None
+    if origin.rstrip('/') != request.host_url.rstrip('/'):
+        return jsonify({'ok': False,
+                        'text': 'rejected: cross-origin request'}), 403
+    return None
+
+
 @app.route('/')
 def index():
     return Response(PAGE, mimetype='text/html')

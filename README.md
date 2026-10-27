@@ -57,7 +57,8 @@ sdn/
 ├── mininet/
 │   ├── topology.py               # LinearTopo: 3 switches, 6 hosts
 │   ├── run_topo.py               # start topology, drop into 'mininet>' CLI
-│   └── verify_connectivity.py    # automated tests T1–T8 + evidence gathering
+│   ├── verify_connectivity.py    # automated tests T1–T8 + evidence gathering
+│   └── purge_state.py            # clean leftover Mininet/OVS state
 ├── outputs/                      # created at run time (not committed):
 │   ├── ryu.log                   #   controller log (PACKET_IN / FLOW_MOD)
 │   ├── verify_output.txt         #   verify suite results
@@ -139,12 +140,16 @@ From Windows: double-click **`start.bat`** — everything (OVS + Ryu +
 topology) comes up in one console window, which becomes the `mininet>`
 prompt. `stop.bat` tears it down. On the **first start after a WSL reboot**
 the window may sit silent for a few seconds while the Windows file system
-under `/mnt/c` warms up — that is normal, not a hang.
+under `/mnt/c` warms up — that is normal, not a hang. All four `*.bat`
+launchers are location-independent: they locate the repo from their own
+folder, so they work wherever you clone it.
 
-> Tip: if your particular Windows console goes silent *after* `[4/4]` with
-> no `mininet>` prompt, that is a WSL console/readline quirk this specific
-> machine can show — use the panel (Option 1), which cannot be affected,
-> or run from the Windows Terminal WSL tab.
+> Tip: if a console ever goes silent right *after* printing `[4/4]` with
+> no `mininet>` prompt — the current version fixed the real cause (the
+> cleanup step used to launch a bare `mn` with a lost `-c` flag, and that
+> interactive Mininet CLI silently waited on the console). If it ever
+> reappears, please report it — and use the panel (Option 1), which is
+> structurally immune.
 
 From a WSL shell:
 
